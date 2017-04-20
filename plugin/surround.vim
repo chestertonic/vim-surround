@@ -23,7 +23,7 @@ function! s:inputtarget()
   while c =~ '^\d\+$'
     let c .= s:getchar()
   endwhile
-  if c == " "
+  if c == " "  || c == "\\"
     let c .= s:getchar()
   endif
   if c =~ "\<Esc>\|\<C-C>\|\0"
@@ -35,7 +35,10 @@ endfunction
 
 function! s:inputreplacement()
   let c = s:getchar()
-  if c == " "
+  while c =~ '^\d\+$'
+    let c .= s:getchar()
+  endwhile
+  if c == " " || c == "\\"
     let c .= s:getchar()
   endif
   if c =~ "\<Esc>" || c =~ "\<C-C>"
@@ -139,9 +142,18 @@ function! s:wrap(string,char,type,removed,special)
   endif
   let pairs = "b()B{}r[]a<>"
   let extraspace = ""
+  let prepend = ""
+  let multi = 1
+  if newchar =~ '^\d\+'
+    let multi = matchstr(newchar, '^\d\+')
+    let newchar = substitute(newchar,'^\d\+','','')
+  endif
   if newchar =~ '^ '
     let newchar = strpart(newchar,1)
     let extraspace = ' '
+  elseif newchar =~ '^\\'
+    let newchar = strpart(newchar,1)
+    let prepend = '\'
   endif
   let idx = stridx(pairs,newchar)
   if newchar == ' '
@@ -209,7 +221,7 @@ function! s:wrap(string,char,type,removed,special)
         endif
       endif
     endif
-  elseif newchar ==# 'l' || newchar == '\'
+  elseif newchar ==# 'l'
     " LaTeX
     let env = input('\begin{')
     if env != ""
@@ -239,11 +251,13 @@ function! s:wrap(string,char,type,removed,special)
   elseif idx >= 0
     let spc = (idx % 3) == 1 ? " " : ""
     let idx = idx / 3 * 3
-    let before = strpart(pairs,idx+1,1) . spc
-    let after  = spc . strpart(pairs,idx+2,1)
+    let before = prepend . strpart(pairs,idx+1,1) . spc
+    let after  = spc . prepend . strpart(pairs,idx+2,1)
+    let prepend = ""
   elseif newchar == "\<C-[>" || newchar == "\<C-]>"
-    let before = "{\n\t"
-    let after  = "\n}"
+    let before = prepend . "{\n\t"
+    let after  = "\n" . prepend . "}"
+    let prepend = ""
   elseif newchar !~ '\a'
     let before = newchar
     let after  = newchar
@@ -252,6 +266,10 @@ function! s:wrap(string,char,type,removed,special)
     let after  = ''
   endif
   let after  = substitute(after ,'\n','\n'.initspaces,'g')
+  if prepend != ""
+    let before = prepend.before
+    let after = prepend.after
+  endif
   if type ==# 'V' || (a:special && type ==# "v")
     let before = substitute(before,' \+$','','')
     let after  = substitute(after ,'^ \+','','')
@@ -270,6 +288,8 @@ function! s:wrap(string,char,type,removed,special)
       endif
     endif
   endif
+  let before = repeat(before, multi)
+  let after = repeat(after, multi)
   if type ==# 'V'
     let before = initspaces.before
   endif
@@ -355,10 +375,24 @@ endfunction " }}}1
 function! s:dosurround(...) " {{{1
   let scount = v:count1
   let char = (a:0 ? a:1 : s:inputtarget())
+  let leftchar = char
+  let rightchar = char
   let spc = ""
+  let escape = ""
   if char =~ '^\d\+'
     let scount = scount * matchstr(char,'^\d\+')
     let char = substitute(char,'^\d\+','','')
+  endif
+  if char =~ '^\\'
+    let char = strpart(char,1)
+    let escape = 1
+    let pairs = "b()B{}r[]a<>"
+    let idx = stridx(pairs, char)
+    if idx >= 0
+      let idx = idx / 3 * 3
+      let leftchar = strpart(pairs, idx+1,1)
+      let rightchar = strpart(pairs, idx+2,1)
+    endif
   endif
   if char =~ '^ '
     let char = strpart(char,1)
@@ -369,6 +403,9 @@ function! s:dosurround(...) " {{{1
   endif
   if char == 'r'
     let char = ']'
+  endif
+  if char == 'q'
+    let char = s:closestquote()
   endif
   let newchar = ""
   if a:0 > 1
@@ -384,7 +421,14 @@ function! s:dosurround(...) " {{{1
   let otype = getregtype('"')
   call setreg('"',"")
   let strcount = (scount == 1 ? "" : scount)
-  if char == '/'
+  if escape
+    let savecursor = getcurpos()
+    if search('\\'.rightchar, "W") && search('\\'.leftchar, "besW")
+      norm! ld`'
+    else
+      call setpos('.', savecursor)
+    endif
+  elseif char == '/'
     exe 'norm! '.strcount.'[/d'.strcount.']/'
   elseif char =~# '[[:punct:][:space:]]' && char !~# '[][(){}<>"''`]'
     exe 'norm! T'.char
@@ -404,7 +448,11 @@ function! s:dosurround(...) " {{{1
   endif
   let oldline = getline('.')
   let oldlnum = line('.')
-  if char ==# "p"
+  if escape
+    call search('\\'.leftchar, "bW")
+    call search('\%#\@!\\'.rightchar, "seW")
+    norm! v`'d
+  elseif char ==# "p"
     call setreg('"','','V')
   elseif char ==# "s" || char ==# "w" || char ==# "W"
     " Do nothing
@@ -558,6 +606,30 @@ function! s:closematch(str) " {{{1
     return ">"
   else
     return ""
+  endif
+endfunction " }}}1
+
+function! s:closestquote() " {{{1
+  let origline = line('.')
+  let origcol = col('.')
+  exec "norm! va'o"
+  exec "norm! \<Esc>"
+  let singlecol = col('.')
+  if singlecol == origcol && getline('.')[singlecol-1] != "'" || singlecol > origcol
+    let singlecol = -1
+  endif
+  call cursor(origline, origcol)
+  exec "norm! va\"o"
+  exec "norm! \<Esc>"
+  let doublecol = col('.')
+  if doublecol == origcol && getline('.')[doublecol-1] != '"' || doublecol > origcol
+    let doublecol = -1
+  endif
+  call cursor(origline, origcol)
+  if singlecol > doublecol
+    return "'"
+  else
+    return '"'
   endif
 endfunction " }}}1
 
